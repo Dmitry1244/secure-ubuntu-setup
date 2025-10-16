@@ -50,12 +50,9 @@ ufw default allow outgoing
 ufw allow 20022/tcp
 ufw allow 8443/tcp
 # ⚠️ Порт 1985 НЕ открываем наружу
+
+ufw --force enable
 ufw reload
-if nc -z 127.0.0.1 20022; then
-  ufw --force enable
-else
-  echo "❌ Новый SSH порт недоступен, UFW не включён"
-fi
 
 # === 5. Запрет ICMP ===
 echo "[5/13] Запрещаем ICMP..."
@@ -101,6 +98,16 @@ x-ui setting -webListenIP 127.0.0.1
 x-ui setting -port 1985
 systemctl restart x-ui
 
+# Проверка, что порт применился
+if ss -tulpn | grep -q '127.0.0.1:1985'; then
+  echo "✅ Панель слушает на localhost:1985"
+else
+  echo "⚠️ Панель всё ещё на случайном порту, повторяем настройку..."
+  x-ui setting -webListenIP 127.0.0.1
+  x-ui setting -port 1985
+  systemctl restart x-ui
+fi
+
 # === 12. Генерация SSL ===
 echo "[12/13] Генерируем самоподписанный SSL..."
 mkdir -p /etc/x-ui/ssl
@@ -109,12 +116,19 @@ openssl req -x509 -nodes -days 825 -newkey rsa:2048 \
   -out /etc/x-ui/ssl/selfsigned.crt \
   -subj "/C=RU/ST=Moscow/L=Moscow/O=3X-UI/CN=localhost"
 
-# === 13. Добавление SSL в конфигурацию ===
+# === 13. Прописываем SSL в панель ===
 echo "[13/13] Добавляем SSL..."
 x-ui setting -ssl true
 x-ui setting -certFile /etc/x-ui/ssl/selfsigned.crt
 x-ui setting -keyFile /etc/x-ui/ssl/selfsigned.key
 systemctl restart x-ui
+
+# Проверка SSL
+if x-ui setting | grep -q "/etc/x-ui/ssl/selfsigned.crt"; then
+  echo "✅ SSL сертификаты успешно прописаны в панель"
+else
+  echo "⚠️ SSL не применился, проверь config.json вручную"
+fi
 
 # === Финал ===
 echo "✅ Готово!"
