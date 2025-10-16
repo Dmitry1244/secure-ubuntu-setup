@@ -49,7 +49,7 @@ ufw default deny incoming
 ufw default allow outgoing
 ufw allow 20022/tcp
 ufw allow 8443/tcp
-ufw allow 1985/tcp
+# ⚠️ Порт 1985 НЕ открываем наружу
 ufw reload
 if nc -z 127.0.0.1 20022; then
   ufw --force enable
@@ -99,6 +99,7 @@ command -v x-ui >/dev/null || { echo "❌ Команда x-ui не найден�
 echo "[11/13] Настраиваем панель..."
 x-ui setting -webListenIP 127.0.0.1
 x-ui setting -port 1985
+systemctl restart x-ui
 
 # === 12. Генерация SSL ===
 echo "[12/13] Генерируем самоподписанный SSL..."
@@ -118,4 +119,4 @@ systemctl restart x-ui
 # === Финал ===
 echo "✅ Готово!"
 echo "🔑 Подключение по SSH: ssh -p 20022 user@IP"
-echo "🌐 Панель 3X-UI доступна через localhost:1985 (используй SSH-туннель)"
+echo "🌐 Панель 3X-UI доступна только через localhost:1985 (используй SSH-туннель)"
