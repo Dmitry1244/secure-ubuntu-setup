@@ -24,7 +24,7 @@ ensure_line() {
 echo "[1/13] Обновляем систему..."
 export DEBIAN_FRONTEND=noninteractive
 apt update && apt -y upgrade
-apt install -y curl wget sudo ufw fail2ban tzdata chrony sqlite3 openssl netcat-openbsd jq
+apt install -y curl wget sudo ufw fail2ban tzdata chrony sqlite3 openssl netcat-openbsd
 
 # === 2. Проверка наличия openssl ===
 command -v openssl >/dev/null || { echo "❌ OpenSSL не установлен"; exit 1; }
@@ -49,10 +49,13 @@ ufw default deny incoming
 ufw default allow outgoing
 ufw allow 20022/tcp
 ufw allow 8443/tcp
-# ⚠️ Порт 1985 НЕ открываем наружу
-
-ufw --force enable
+ufw allow 1985/tcp
 ufw reload
+if nc -z 127.0.0.1 20022; then
+  ufw --force enable
+else
+  echo "❌ Новый SSH порт недоступен, UFW не включён"
+fi
 
 # === 5. Запрет ICMP ===
 echo "[5/13] Запрещаем ICMP..."
@@ -92,40 +95,27 @@ bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.
 # === 10. Проверка наличия x-ui CLI ===
 command -v x-ui >/dev/null || { echo "❌ Команда x-ui не найдена"; exit 1; }
 
-# === 11. Генерация SSL ===
-echo "[11/13] Генерируем самоподписанный SSL..."
+# === 11. Настройка панели 3X-UI ===
+echo "[11/13] Настраиваем панель..."
+x-ui setting -webListenIP 127.0.0.1
+x-ui setting -port 1985
+
+# === 12. Генерация SSL ===
+echo "[12/13] Генерируем самоподписанный SSL..."
 mkdir -p /etc/x-ui/ssl
 openssl req -x509 -nodes -days 825 -newkey rsa:2048 \
   -keyout /etc/x-ui/ssl/selfsigned.key \
   -out /etc/x-ui/ssl/selfsigned.crt \
   -subj "/C=RU/ST=Moscow/L=Moscow/O=3X-UI/CN=localhost"
 
-# === 12. Прямая правка config.json через jq ===
-CONFIG_FILE="/usr/local/x-ui/bin/config.json"
-if [ -f "$CONFIG_FILE" ]; then
-  echo "[12/13] Настраиваем config.json..."
-  jq '.webListenIP="127.0.0.1" 
-      | .port=1985 
-      | .ssl=true 
-      | .certFile="/etc/x-ui/ssl/selfsigned.crt" 
-      | .keyFile="/etc/x-ui/ssl/selfsigned.key"' \
-      "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
-else
-  echo "⚠️ config.json не найден, проверь путь вручную"
-fi
-
-# === 13. Перезапуск панели ===
-echo "[13/13] Перезапускаем x-ui..."
+# === 13. Добавление SSL в конфигурацию ===
+echo "[13/13] Добавляем SSL..."
+x-ui setting -ssl true
+x-ui setting -certFile /etc/x-ui/ssl/selfsigned.crt
+x-ui setting -keyFile /etc/x-ui/ssl/selfsigned.key
 systemctl restart x-ui
-
-# Проверка
-if ss -tulpn | grep -q '127.0.0.1:1985'; then
-  echo "✅ Панель слушает на localhost:1985"
-else
-  echo "⚠️ Панель не слушает на 1985, проверь config.json"
-fi
 
 # === Финал ===
 echo "✅ Готово!"
 echo "🔑 Подключение по SSH: ssh -p 20022 user@IP"
-echo "🌐 Панель 3X-UI доступна только через localhost:1985 (используй SSH-туннель)"
+echo "🌐 Панель 3X-UI доступна через localhost:1985 (используй SSH-туннель)"
