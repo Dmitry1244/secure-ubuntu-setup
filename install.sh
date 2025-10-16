@@ -24,7 +24,7 @@ ensure_line() {
 echo "[1/13] Обновляем систему..."
 export DEBIAN_FRONTEND=noninteractive
 apt update && apt -y upgrade
-apt install -y curl wget sudo ufw fail2ban tzdata chrony sqlite3 openssl netcat-openbsd
+apt install -y curl wget sudo ufw fail2ban tzdata chrony sqlite3 openssl netcat-openbsd jq
 
 # === 2. Проверка наличия openssl ===
 command -v openssl >/dev/null || { echo "❌ OpenSSL не установлен"; exit 1; }
@@ -92,42 +92,37 @@ bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.
 # === 10. Проверка наличия x-ui CLI ===
 command -v x-ui >/dev/null || { echo "❌ Команда x-ui не найдена"; exit 1; }
 
-# === 11. Настройка панели 3X-UI ===
-echo "[11/13] Настраиваем панель..."
-x-ui setting -webListenIP 127.0.0.1
-x-ui setting -port 1985
-systemctl restart x-ui
-
-# Проверка, что порт применился
-if ss -tulpn | grep -q '127.0.0.1:1985'; then
-  echo "✅ Панель слушает на localhost:1985"
-else
-  echo "⚠️ Панель всё ещё на случайном порту, повторяем настройку..."
-  x-ui setting -webListenIP 127.0.0.1
-  x-ui setting -port 1985
-  systemctl restart x-ui
-fi
-
-# === 12. Генерация SSL ===
-echo "[12/13] Генерируем самоподписанный SSL..."
+# === 11. Генерация SSL ===
+echo "[11/13] Генерируем самоподписанный SSL..."
 mkdir -p /etc/x-ui/ssl
 openssl req -x509 -nodes -days 825 -newkey rsa:2048 \
   -keyout /etc/x-ui/ssl/selfsigned.key \
   -out /etc/x-ui/ssl/selfsigned.crt \
   -subj "/C=RU/ST=Moscow/L=Moscow/O=3X-UI/CN=localhost"
 
-# === 13. Прописываем SSL в панель ===
-echo "[13/13] Добавляем SSL..."
-x-ui setting -ssl true
-x-ui setting -certFile /etc/x-ui/ssl/selfsigned.crt
-x-ui setting -keyFile /etc/x-ui/ssl/selfsigned.key
+# === 12. Прямая правка config.json через jq ===
+CONFIG_FILE="/usr/local/x-ui/bin/config.json"
+if [ -f "$CONFIG_FILE" ]; then
+  echo "[12/13] Настраиваем config.json..."
+  jq '.webListenIP="127.0.0.1" 
+      | .port=1985 
+      | .ssl=true 
+      | .certFile="/etc/x-ui/ssl/selfsigned.crt" 
+      | .keyFile="/etc/x-ui/ssl/selfsigned.key"' \
+      "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+else
+  echo "⚠️ config.json не найден, проверь путь вручную"
+fi
+
+# === 13. Перезапуск панели ===
+echo "[13/13] Перезапускаем x-ui..."
 systemctl restart x-ui
 
-# Проверка SSL
-if x-ui setting | grep -q "/etc/x-ui/ssl/selfsigned.crt"; then
-  echo "✅ SSL сертификаты успешно прописаны в панель"
+# Проверка
+if ss -tulpn | grep -q '127.0.0.1:1985'; then
+  echo "✅ Панель слушает на localhost:1985"
 else
-  echo "⚠️ SSL не применился, проверь config.json вручную"
+  echo "⚠️ Панель не слушает на 1985, проверь config.json"
 fi
 
 # === Финал ===
