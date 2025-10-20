@@ -1,113 +1,115 @@
-#!/bin/bash
-# Автоматическая настройка Ubuntu-сервера с 3X-UI и безопасностью
-# Автор: Дмитрий & Copilot 🚀
+#!/usr/bin/env bash
+set -euo pipefail
 
-# === Прелюдия ===
-set -e
-trap 'echo "⚠️ Ошибка на строке $LINENO. Прерываем..."' ERR
+LOGFILE="/var/log/setup-3xui.log"
+ROLLBACK_DIR="/var/log/setup-rollback-$(date +%s)"
+SSH_PORT=20022
+UFW_PORTS=(8443 20022 1985)
 
-exec > >(tee -a /var/log/setup.log) 2>&1
-echo "📜 Логирование включено: /var/log/setup.log"
+# Перенаправляем вывод в лог и создаём директорию для отката
+exec > >(tee -a "$LOGFILE") 2>&1
+mkdir -p "$ROLLBACK_DIR"
 
-if [ "$EUID" -ne 0 ]; then
-  echo "❌ Пожалуйста, запустите скрипт от root"
+trap 'rollback' ERR
+
+rollback() {
+  echo "!!! Ошибка. Выполняется откат изменений..."
+  cp "$ROLLBACK_DIR"/sshd_config   /etc/ssh/sshd_config   && systemctl reload sshd
+  cp "$ROLLBACK_DIR"/ufw.conf       /etc/ufw/ufw.conf       && ufw reload
+  cp "$ROLLBACK_DIR"/sysctl.conf    /etc/sysctl.conf        && sysctl -p
+  cp "$ROLLBACK_DIR"/jail.local     /etc/fail2ban/jail.local && systemctl restart fail2ban
+  cp "$ROLLBACK_DIR"/ntp.conf       /etc/ntp.conf           && systemctl restart ntp
+  echo "Откат завершён."
   exit 1
-fi
+}
 
-# === 1. Обновление системы ===
-echo "[1/13] Обновляем систему..."
-apt update && apt upgrade -y
-apt install -y curl wget sudo ufw fail2ban tzdata chrony sqlite3 openssl
+backup_file() {
+  local f="$1"
+  [ -f "$f" ] && cp "$f" "$ROLLBACK_DIR"/
+}
 
-# === 2. Проверка наличия openssl ===
-echo "[2/13] Проверяем наличие openssl..."
-if ! command -v openssl &>/dev/null; then
-  echo "❌ OpenSSL не установлен. Прерываем."
-  exit 1
-fi
+update_system() {
+  apt update && apt upgrade -y
+}
 
-# === 3. Смена порта SSH на 20022 ===
-echo "[3/13] Меняем порт SSH на 20022..."
-cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.$(date +%s)
-sed -i 's/^#Port 22/Port 20022/' /etc/ssh/sshd_config
-sed -i 's/^Port 22/Port 20022/' /etc/ssh/sshd_config
-systemctl restart ssh
+configure_ssh() {
+  backup_file /etc/ssh/sshd_config
+  sed -i "/^#Port /d; s/^Port .*/Port $SSH_PORT/; t; \$aPort $SSH_PORT" /etc/ssh/sshd_config
+  systemctl reload sshd
+}
 
-# === 4. Настройка UFW ===
-echo "[4/13] Настраиваем UFW..."
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow 20022/tcp   # SSH
-ufw allow 8443/tcp    # HTTPS
-ufw allow 1985/tcp    # панель 3X-UI
-ufw --force enable
+configure_ufw() {
+  backup_file /etc/ufw/ufw.conf
+  ufw default deny incoming
+  ufw default allow outgoing
+  for p in "${UFW_PORTS[@]}"; do ufw allow "$p"/tcp; done
+  ufw --force enable
+}
 
-# === 5. Запрет пинга (ICMP) ===
-echo "[5/13] Запрещаем ICMP (ping)..."
-echo "net.ipv4.icmp_echo_ignore_all=1" >> /etc/sysctl.conf
-sysctl -p
+disable_ping() {
+  backup_file /etc/sysctl.conf
+  sysctl -w net.ipv4.icmp_echo_ignore_all=1
+  sed -i "/icmp_echo_ignore_all/d" /etc/sysctl.conf
+  echo "net.ipv4.icmp_echo_ignore_all=1" >> /etc/sysctl.conf
+}
 
-# === 6. Настройка Fail2ban ===
-echo "[6/13] Настраиваем Fail2ban..."
-cat >/etc/fail2ban/jail.local <<EOL
+install_fail2ban() {
+  backup_file /etc/fail2ban/jail.local
+  apt install -y fail2ban
+  cat > /etc/fail2ban/jail.local <<EOF
+[DEFAULT]
+bantime  = 1h
+findtime = 10m
+maxretry = 5
+
 [sshd]
 enabled = true
-port    = 20022
-logpath = %(sshd_log)s
-maxretry = 5
-bantime = 3600
-EOL
+port    = $SSH_PORT
+EOF
+  systemctl restart fail2ban
+}
 
-systemctl enable fail2ban
-systemctl restart fail2ban
+install_sqlite3() {
+  apt install -y sqlite3
+}
 
-# === 7. Часовой пояс и NTP ===
-echo "[7/13] Устанавливаем часовой пояс GMT+3 (Europe/Moscow)..."
-timedatectl set-timezone Europe/Moscow
-systemctl enable chrony
-systemctl restart chrony
-timedatectl set-ntp true
+configure_ntp() {
+  backup_file /etc/ntp.conf
+  apt install -y ntp
+  systemctl enable ntp
+  systemctl restart ntp
+}
 
-# === 8. Проверка времени ===
-echo "[8/13] Проверяем синхронизацию времени..."
-timedatectl status
-chronyc tracking
+check_ntp() {
+  ntpq -p
+}
 
-# === 9. Установка 3X-UI ===
-echo "[9/13] Устанавливаем 3X-UI..."
-bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh)
+generate_ssl() {
+  openssl req -x509 -nodes -days 365 \
+    -newkey rsa:2048 \
+    -keyout  /etc/ssl/private/3xui.key \
+    -out     /etc/ssl/certs/3xui.crt \
+    -subj    "/CN=$(hostname)"
+}
 
-# === 10. Проверка наличия x-ui CLI ===
-echo "[10/13] Проверяем наличие команды x-ui..."
-if ! command -v x-ui &>/dev/null; then
-  echo "❌ Команда x-ui не найдена. Прерываем."
-  exit 1
-fi
+install_3xui() {
+  echo "Устанавливаем 3X-UI панель..."  
+  bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)  # установка из официального репозитория скрипта
+}
 
-# === 11. Настройка панели 3X-UI ===
-echo "[11/13] Меняем порт панели и ограничиваем доступ на localhost..."
-x-ui setting -webListenIP 127.0.0.1
-x-ui setting -port 1985
+main() {
+  echo "=== Начало настройки: $(date) ==="
+  update_system
+  configure_ssh
+  configure_ufw
+  disable_ping
+  install_fail2ban
+  install_sqlite3
+  configure_ntp
+  check_ntp
+  generate_ssl
+  install_3xui
+  echo "=== Настройка завершена: $(date) ==="
+}
 
-# === 12. Генерация самоподписанного SSL-сертификата ===
-echo "[12/13] Генерируем самоподписанный SSL-сертификат..."
-mkdir -p /etc/x-ui/ssl
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout /etc/x-ui/ssl/selfsigned.key \
-  -out /etc/x-ui/ssl/selfsigned.crt \
-  -subj "/C=RU/ST=Moscow/L=Moscow/O=3X-UI/CN=localhost"
-
-# === 13. Добавление SSL в конфигурацию панели ===
-echo "[13/13] Добавляем SSL в конфигурацию 3X-UI..."
-x-ui setting -ssl true
-x-ui setting -certFile /etc/x-ui/ssl/selfsigned.crt
-x-ui setting -keyFile /etc/x-ui/ssl/selfsigned.key
-systemctl restart x-ui
-
-# === Финал ===
-echo "✅ Готово!"
-echo "🔑 Подключение по SSH: ssh -p 20022 user@IP"
-echo "🌐 Панель 3X-UI доступна только через localhost:1985 (используй SSH-туннель)"
-echo "🔒 SSL включён: самоподписанный сертификат"
-echo "🕒 Проверка времени:"
-timedatectl
+main "$@"
