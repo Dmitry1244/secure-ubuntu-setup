@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
 
 LOGFILE="/var/log/setup-3xui.log"
 ROLLBACK_DIR="/var/log/setup-rollback-$(date +%s)"
@@ -14,11 +15,11 @@ trap 'rollback' ERR
 
 rollback() {
   echo "!!! Ошибка. Выполняется откат изменений..."
-  cp "$ROLLBACK_DIR"/sshd_config   /etc/ssh/sshd_config   && systemctl reload sshd
-  cp "$ROLLBACK_DIR"/ufw.conf       /etc/ufw/ufw.conf       && ufw reload
-  cp "$ROLLBACK_DIR"/sysctl.conf    /etc/sysctl.conf        && sysctl -p
-  cp "$ROLLBACK_DIR"/jail.local     /etc/fail2ban/jail.local && systemctl restart fail2ban
-  cp "$ROLLBACK_DIR"/ntp.conf       /etc/ntp.conf           && systemctl restart ntp
+  cp "$ROLLBACK_DIR"/sshd_config    /etc/ssh/sshd_config    && systemctl reload sshd
+  cp "$ROLLBACK_DIR"/ufw.conf        /etc/ufw/ufw.conf        && ufw reload
+  cp "$ROLLBACK_DIR"/sysctl.conf     /etc/sysctl.conf         && sysctl -p
+  cp "$ROLLBACK_DIR"/jail.local      /etc/fail2ban/jail.local && systemctl restart fail2ban
+  cp "$ROLLBACK_DIR"/ntp.conf        /etc/ntp.conf            && systemctl restart ntp
   echo "Откат завершён."
   exit 1
 }
@@ -29,7 +30,10 @@ backup_file() {
 }
 
 update_system() {
-  apt update && apt upgrade -y
+  apt-get update
+  apt-get -y upgrade \
+    -o Dpkg::Options::="--force-confdef" \
+    -o Dpkg::Options::="--force-confold"
 }
 
 configure_ssh() {
@@ -55,7 +59,7 @@ disable_ping() {
 
 install_fail2ban() {
   backup_file /etc/fail2ban/jail.local
-  apt install -y fail2ban
+  apt-get install -y fail2ban
   cat > /etc/fail2ban/jail.local <<EOF
 [DEFAULT]
 bantime  = 1h
@@ -70,12 +74,12 @@ EOF
 }
 
 install_sqlite3() {
-  apt install -y sqlite3
+  apt-get install -y sqlite3
 }
 
 configure_ntp() {
   backup_file /etc/ntp.conf
-  apt install -y ntp
+  apt-get install -y ntp
   systemctl enable ntp
   systemctl restart ntp
 }
@@ -93,8 +97,8 @@ generate_ssl() {
 }
 
 install_3xui() {
-  echo "Устанавливаем 3X-UI панель..."  
-  bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)  # установка из официального репозитория скрипта
+  echo "Устанавливаем 3X-UI панель..."
+  bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)
 }
 
 main() {
