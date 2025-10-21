@@ -3,177 +3,153 @@ set -euo pipefail
 
 LOGFILE="/var/log/server_setup.log"
 DRY_RUN=false
+TEST_MODE=false
 
-# === Аргументы ===
-if [[ "${1:-}" == "--dry-run" ]]; then
-  DRY_RUN=true
-  echo "🔍 DRY-RUN режим: изменения НЕ будут применены"
-fi
+case "${1:-}" in
+  --dry-run) DRY_RUN=true; echo "🔍 DRY-RUN режим: изменения НЕ будут применены" ;;
+  --test) TEST_MODE=true; echo "🧪 ТЕСТОВЫЙ режим: симулируем ошибки для проверки rollback" ;;
+esac
 
-# === Логирование ===
-log() {
-  local level="$1"; shift
-  echo "[$level] $*" | tee -a "$LOGFILE"
-}
+log() { echo "[$1] $2" | tee -a "$LOGFILE"; }
+run() { $DRY_RUN && log "INFO" "DRY-RUN: $*" || eval "$@"; }
 
-run() {
-  if $DRY_RUN; then
-    log "INFO" "DRY-RUN: $*"
-  else
-    eval "$@"
-  fi
-}
+# === Шаги ===
 
-# === Модуль 1: Обновление системы ===
-update_system() {
-  log "INFO" "[1] Обновление системы..."
+step_update_system() {
+  log INFO "[1] Обновление системы..."
   run "export DEBIAN_FRONTEND=noninteractive"
-  run "apt-get update -y"
-  run "apt-get upgrade -y"
-  run "apt-get dist-upgrade -y"
+  run "apt-get update -y && apt-get upgrade -y && apt-get dist-upgrade -y"
 }
 
-# === Модуль 2: Настройка SSH-порта с rollback ===
-configure_ssh_port() {
-  local sshd_config="/etc/ssh/sshd_config"
-  local rollback_needed=false
-
-  log "INFO" "[2] Настройка SSH на порты 22 и 20022..."
+step_configure_ssh() {
+  log INFO "[2] Настройка SSH..."
+  local cfg="/etc/ssh/sshd_config"
   run "ufw allow 22/tcp"
   run "ufw allow 20022/tcp"
-
-  grep -q 'Port 20022' "$sshd_config" || run "echo 'Port 20022' >> $sshd_config"
-  grep -q 'Port 22' "$sshd_config" || run "echo 'Port 22' >> $sshd_config"
-
+  grep -q 'Port 20022' "$cfg" || run "echo 'Port 20022' >> $cfg"
+  grep -q 'Port 22' "$cfg" || run "echo 'Port 22' >> $cfg"
+  run "sshd -t" || { log ERROR "Ошибка в конфигурации SSH"; return; }
   restart_ssh
-
   sleep 2
-  if ! ss -tln | grep -q ':20022'; then
-    log "ERROR" "Порт 20022 не слушается — откат..."
-    run "sed -i '/Port 20022/d' $sshd_config"
-    run "ufw delete allow 20022/tcp"
+  if $TEST_MODE || ! ss -tln | grep -q ':20022' || ! nc -z localhost 20022; then
+    log ERROR "❌ Порт 20022 недоступен — откат..."
+    run "sed -i '/Port 20022/d' $cfg"
+    run "ufw delete allow 20022/tcp || true"
     restart_ssh
-    rollback_needed=true
-  fi
-
-  if ! nc -z localhost 20022; then
-    log "ERROR" "Не удалось подключиться к порту 20022 — откат..."
-    run "sed -i '/Port 20022/d' $sshd_config"
-    run "ufw delete allow 20022/tcp"
-    restart_ssh
-    rollback_needed=true
-  fi
-
-  if $rollback_needed; then
-    log "WARN" "Откат выполнен. SSH остался на порту 22."
+    log WARN "Откат SSH выполнен. Остался порт 22."
   else
-    log "INFO" "✅ SSH успешно настроен на порты 22 и 20022."
+    log INFO "✅ SSH слушает на портах 22 и 20022."
   fi
 }
 
 restart_ssh() {
-  if systemctl list-unit-files | grep -q '^ssh\.service'; then
-    run "systemctl reload ssh || systemctl restart ssh"
-  elif systemctl list-unit-files | grep -q '^sshd\.service'; then
-    run "systemctl reload sshd || systemctl restart sshd"
-  elif systemctl list-unit-files | grep -q '^ssh\.socket'; then
-    run "systemctl restart ssh.socket"
-  else
-    log "ERROR" "Не удалось найти SSH юнит для перезапуска."
-  fi
+  systemctl reload ssh 2>/dev/null || systemctl restart ssh 2>/dev/null || \
+  systemctl reload sshd 2>/dev/null || systemctl restart sshd 2>/dev/null || \
+  systemctl restart ssh.socket 2>/dev/null || log ERROR "Не удалось перезапустить SSH"
 }
 
-# === Модуль 3: Настройка UFW ===
-configure_firewall() {
-  log "INFO" "[3] Настройка UFW..."
+step_firewall() {
+  log INFO "[3] Настройка UFW..."
   run "ufw allow 8443/tcp"
   run "ufw allow 1985/tcp"
   run "ufw --force enable"
+  if $TEST_MODE || ! ufw status | grep -q '8443'; then
+    log ERROR "❌ UFW не применил правило — откат..."
+    run "ufw delete allow 8443/tcp || true"
+    run "ufw delete allow 1985/tcp || true"
+  else
+    log INFO "✅ UFW настроен."
+  fi
 }
 
-# === Модуль 4: Запрет ICMP (ping) ===
-disable_ping() {
-  log "INFO" "[4] Запрет ICMP (ping)..."
-  grep -q "net.ipv4.icmp_echo_ignore_all" /etc/sysctl.conf || run "echo 'net.ipv4.icmp_echo_ignore_all=1' >> /etc/sysctl.conf"
+step_disable_ping() {
+  log INFO "[4] Запрет ICMP..."
+  grep -q "icmp_echo_ignore_all" /etc/sysctl.conf || run "echo 'net.ipv4.icmp_echo_ignore_all=1' >> /etc/sysctl.conf"
   run "sysctl -w net.ipv4.icmp_echo_ignore_all=1"
+  if $TEST_MODE || [[ "$(sysctl -n net.ipv4.icmp_echo_ignore_all)" != "1" ]]; then
+    log ERROR "❌ ICMP не отключён — откат..."
+    run "sysctl -w net.ipv4.icmp_echo_ignore_all=0"
+  else
+    log INFO "✅ ICMP отключён."
+  fi
 }
 
-# === Модуль 5: Установка Fail2ban ===
-install_fail2ban() {
-  log "INFO" "[5] Установка Fail2ban..."
+step_fail2ban() {
+  log INFO "[5] Установка Fail2ban..."
   run "apt-get install -y fail2ban"
   run "systemctl enable --now fail2ban"
+  if $TEST_MODE || ! systemctl is-active --quiet fail2ban; then
+    log ERROR "❌ Fail2ban не активен — откат..."
+    run "systemctl stop fail2ban"
+    run "apt-get remove -y fail2ban"
+  else
+    log INFO "✅ Fail2ban работает."
+  fi
 }
 
-# === Модуль 6: Установка sqlite3 ===
-install_sqlite() {
-  log "INFO" "[6] Установка sqlite3..."
+step_sqlite() {
+  log INFO "[6] Установка sqlite3..."
   run "apt-get install -y sqlite3"
+  if $TEST_MODE || ! command -v sqlite3 >/dev/null; then
+    log ERROR "❌ sqlite3 не найден — откат..."
+    run "apt-get remove -y sqlite3"
+  else
+    log INFO "✅ sqlite3 установлен."
+  fi
 }
 
-# === Модуль 7: Установка и запуск chrony ===
-setup_ntp() {
-  log "INFO" "[7] Установка chrony..."
+step_ntp() {
+  log INFO "[7] Установка chrony..."
   run "apt-get install -y chrony"
   run "systemctl enable --now chrony"
+  if $TEST_MODE || ! chronyc tracking | grep -q 'Leap status'; then
+    log ERROR "❌ NTP не синхронизирован — откат..."
+    run "systemctl stop chrony"
+    run "apt-get remove -y chrony"
+  else
+    log INFO "✅ NTP синхронизирован."
+  fi
 }
 
-# === Модуль 8: Проверка NTP ===
-verify_ntp() {
-  log "INFO" "[8] Проверка NTP..."
-  run "chronyc tracking || true"
-}
-
-# === Модуль 9: Генерация SSL сертификата ===
-generate_ssl_cert() {
+step_ssl() {
+  log INFO "[8] Генерация SSL..."
   local dir="/etc/ssl/selfsigned"
-  local crt="$dir/server.crt"
-  local key="$dir/server.key"
-
-  log "INFO" "[9] Генерация SSL сертификата..."
   run "mkdir -p $dir"
-
-  if [ ! -f "$crt" ]; then
-    run "openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-      -keyout $key -out $crt \
-      -subj '/C=RU/ST=MSK/L=Moscow/O=MyOrg/OU=IT/CN=$(hostname)'"
-    log "INFO" "✅ Сертификат создан."
+  run "openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+    -keyout $dir/server.key -out $dir/server.crt \
+    -subj '/C=RU/ST=MSK/L=Moscow/O=MyOrg/OU=IT/CN=$(hostname)'"
+  if $TEST_MODE || ! openssl x509 -checkend 86400 -in "$dir/server.crt" >/dev/null; then
+    log ERROR "❌ Сертификат недействителен — откат..."
+    run "rm -f $dir/server.crt $dir/server.key"
   else
-    log "INFO" "🔄 Сертификат уже существует, пропускаем."
-  fi
-
-  local end_date
-  end_date=$(openssl x509 -in "$crt" -noout -enddate | cut -d= -f2)
-  log "INFO" "Пути сертификатов:"
-  log "INFO" "  Сертификат: $crt"
-  log "INFO" "  Ключ:       $key"
-  log "INFO" "  Действителен до: $end_date"
-}
-
-# === Модуль 10: Установка панели 3X-UI ===
-install_3xui() {
-  log "INFO" "[10] Установка панели 3X-UI..."
-  if [ ! -d "/usr/local/x-ui" ]; then
-    run "bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh)"
-  else
-    log "INFO" "🔄 3X-UI уже установлена, пропускаем."
+    log INFO "✅ Сертификат создан."
+    run "openssl x509 -in $dir/server.crt -noout -enddate"
   fi
 }
 
-# === Главная функция ===
+step_3xui() {
+  log INFO "[9] Установка 3X-UI..."
+  run "bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh)"
+  if $TEST_MODE || [ ! -d "/usr/local/x-ui" ]; then
+    log ERROR "❌ 3X-UI не установлена — откат..."
+    run "rm -rf /usr/local/x-ui"
+  else
+    log INFO "✅ 3X-UI установлена."
+  fi
+}
+
 main() {
-  log "INFO" "=== Начало настройки: $(date) ==="
-  update_system
-  configure_ssh_port
-  configure_firewall
-  disable_ping
-  install_fail2ban
-  install_sqlite
-  setup_ntp
-  verify_ntp
-  generate_ssl_cert
-  install_3xui
-  log "INFO" "=== Настройка завершена: $(date) ==="
+  log INFO "=== Начало настройки: $(date) ==="
+  step_update_system
+  step_configure_ssh
+  step_firewall
+  step_disable_ping
+  step_fail2ban
+  step_sqlite
+  step_ntp
+  step_ssl
+  step_3xui
+  log INFO "=== Завершено: $(date) ==="
 }
 
 main
