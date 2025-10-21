@@ -1,119 +1,125 @@
-#!/usr/bin/env bash
-set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
+#!/bin/bash
 
-LOGFILE="/var/log/setup-3xui.log"
-ROLLBACK_DIR="/var/log/setup-rollback-$(date +%s)"
-SSH_PORT=20022
-UFW_PORTS=(8443 20022 1985)
+# Этот скрипт настраивает сервер Ubuntu согласно указанным требованиям.
+# Запускайте его от root (sudo -i) или с sudo.
+# Внимание: Скрипт изменит SSH порт на 20022 — убедитесь, что вы подключены не по старому порту, или добавьте правило в UFW заранее.
+# Для установки 3X-UI скрипт запустит официальный инсталлятор, который является интерактивным (спросит username, password, port).
+# Рекомендуется установить порт панели на 8443, так как он разрешен в UFW.
+# Самоподписанный SSL генерируется в /root/cert — это может быть использовано для 3X-UI (в панели настройте сертификаты).
 
-# Перенаправляем вывод в лог и создаём директорию для отката
-exec > >(tee -a "$LOGFILE") 2>&1
-mkdir -p "$ROLLBACK_DIR"
+# Цвета для вывода
+GREEN="\033[0;32m"
+RED="\033[0;31m"
+YELLOW="\033[1;33m"
+RESET="\033[0m"
 
-trap 'rollback' ERR
-
-rollback() {
-  echo "!!! Ошибка. Выполняется откат изменений..."
-  cp "$ROLLBACK_DIR"/sshd_config    /etc/ssh/sshd_config    && systemctl reload sshd
-  cp "$ROLLBACK_DIR"/ufw.conf        /etc/ufw/ufw.conf        && ufw reload
-  cp "$ROLLBACK_DIR"/sysctl.conf     /etc/sysctl.conf         && sysctl -p
-  cp "$ROLLBACK_DIR"/jail.local      /etc/fail2ban/jail.local && systemctl restart fail2ban
-  cp "$ROLLBACK_DIR"/ntp.conf        /etc/ntp.conf            && systemctl restart ntp
-  echo "Откат завершён."
-  exit 1
+# Функция для вывода успеха
+success() {
+    echo -e "${GREEN}[УСПЕХ] $1${RESET}"
 }
 
-backup_file() {
-  local f="$1"
-  [ -f "$f" ] && cp "$f" "$ROLLBACK_DIR"/
+# Функция для вывода ошибки и выхода
+error() {
+    echo -e "${RED}[ОШИБКА] $1${RESET}"
+    exit 1
 }
 
-update_system() {
-  apt-get update
-  apt-get -y upgrade \
-    -o Dpkg::Options::="--force-confdef" \
-    -o Dpkg::Options::="--force-confold"
+# Функция для вывода предупреждения
+warning() {
+    echo -e "${YELLOW}[ПРЕДУПРЕЖДЕНИЕ] $1${RESET}"
 }
 
-configure_ssh() {
-  backup_file /etc/ssh/sshd_config
-  sed -i "/^#Port /d; s/^Port .*/Port $SSH_PORT/; t; \$aPort $SSH_PORT" /etc/ssh/sshd_config
-  systemctl reload sshd
-}
+# Проверка на root
+if [ "$EUID" -ne 0 ]; then
+    error "Скрипт должен запускаться от root. Используйте sudo."
+fi
 
-configure_ufw() {
-  backup_file /etc/ufw/ufw.conf
-  ufw default deny incoming
-  ufw default allow outgoing
-  for p in "${UFW_PORTS[@]}"; do ufw allow "$p"/tcp; done
-  ufw --force enable
-}
+# Интерактивный режим: спросить подтверждение перед запуском
+read -p "Вы уверены, что хотите запустить настройку? Это изменит конфигурацию сервера (y/n): " confirm
+if [[ ! $confirm =~ ^[Yy]$ ]]; then
+    error "Настройка отменена."
+fi
 
-disable_ping() {
-  backup_file /etc/sysctl.conf
-  sysctl -w net.ipv4.icmp_echo_ignore_all=1
-  sed -i "/icmp_echo_ignore_all/d" /etc/sysctl.conf
-  echo "net.ipv4.icmp_echo_ignore_all=1" >> /etc/sysctl.conf
-}
+# 1. Обновление системы и всех компонентов
+success "Шаг 1: Обновление системы..."
+apt update -y && apt upgrade -y && apt dist-upgrade -y && apt autoremove -y || error "Не удалось обновить систему."
 
-install_fail2ban() {
-  backup_file /etc/fail2ban/jail.local
-  apt-get install -y fail2ban
-  cat > /etc/fail2ban/jail.local <<EOF
-[DEFAULT]
-bantime  = 1h
-findtime = 10m
-maxretry = 5
+# 2. Смена стандартного SSH порта на 20022
+success "Шаг 2: Смена SSH порта на 20022..."
+if grep -q "^Port 20022" /etc/ssh/sshd_config; then
+    warning "SSH порт уже 20022. Пропуск."
+else
+    sed -i 's/#Port 22/Port 20022/g' /etc/ssh/sshd_config || error "Не удалось изменить SSH конфиг."
+    sed -i 's/Port 22/Port 20022/g' /etc/ssh/sshd_config || error "Не удалось изменить SSH конфиг."
+fi
+systemctl restart ssh || error "Не удалось перезапустить SSH."
+warning "SSH теперь на порту 20022. Убедитесь, что ваш клиент обновлен!"
 
-[sshd]
-enabled = true
-port    = $SSH_PORT
-EOF
-  systemctl restart fail2ban
-}
+# 3. Настройка Firewall UFW с разрешенными портами: 8443/tcp, 20022/tcp, 1985/tcp
+success "Шаг 3: Настройка UFW..."
+apt install ufw -y || error "Не удалось установить UFW."
+ufw allow 8443/tcp || error "Не удалось разрешить 8443/tcp."
+ufw allow 20022/tcp || error "Не удалось разрешить 20022/tcp."
+ufw allow 1985/tcp || error "Не удалось разрешить 1985/tcp."
+ufw --force enable || error "Не удалось включить UFW."
+ufw reload || error "Не удалось перезагрузить UFW."
+ufw status || error "Не удалось проверить статус UFW."
 
-install_sqlite3() {
-  apt-get install -y sqlite3
-}
+# 4. Запрет пинга сервера
+success "Шаг 4: Запрет пинга..."
+if grep -q "net.ipv4.icmp_echo_ignore_all = 1" /etc/sysctl.conf; then
+    warning "Пинг уже запрещен. Пропуск."
+else
+    echo "net.ipv4.icmp_echo_ignore_all = 1" >> /etc/sysctl.conf || error "Не удалось добавить правило в sysctl.conf."
+fi
+sysctl -p || error "Не удалось применить sysctl."
+success "Пинг запрещен. Проверьте: ping localhost (должен игнорировать)."
 
-configure_ntp() {
-  backup_file /etc/ntp.conf
-  apt-get install -y ntp
-  systemctl enable ntp
-  systemctl restart ntp
-}
+# 5. Установка и настройка Fail2ban (с jail для SSH на новом порту)
+success "Шаг 5: Установка и настройка Fail2ban..."
+apt install fail2ban -y || error "Не удалось установить Fail2ban."
+cp /etc/fail2ban/jail.conf /etc/fail2ban/jail.local || error "Не удалось скопировать jail.conf."
+if ! grep -q "\[sshd\]" /etc/fail2ban/jail.local; then
+    echo "[sshd]" >> /etc/fail2ban/jail.local
+    echo "enabled = true" >> /etc/fail2ban/jail.local
+    echo "port = 20022" >> /etc/fail2ban/jail.local
+else
+    sed -i '/\[sshd\]/,/^\[/ s/enabled = false/enabled = true/' /etc/fail2ban/jail.local
+    sed -i '/\[sshd\]/,/^\[/ s/port     = ssh/port     = 20022/' /etc/fail2ban/jail.local
+fi
+systemctl enable fail2ban --now || error "Не удалось включить Fail2ban."
+systemctl restart fail2ban || error "Не удалось перезапустить Fail2ban."
+fail2ban-client status sshd || warning "Jail sshd не активен — проверьте конфиг."
 
-check_ntp() {
-  ntpq -p
-}
+# 6. Установка sqlite3
+success "Шаг 6: Установка sqlite3..."
+apt install sqlite3 -y || error "Не удалось установить sqlite3."
+sqlite3 --version || error "Не удалось проверить версию sqlite3."
 
-generate_ssl() {
-  openssl req -x509 -nodes -days 365 \
-    -newkey rsa:2048 \
-    -keyout  /etc/ssl/private/3xui.key \
-    -out     /etc/ssl/certs/3xui.crt \
-    -subj    "/CN=$(hostname)"
-}
+# 7. Синхронизация времени через NTP (используем chrony для полнофункционального NTP)
+success "Шаг 7: Синхронизация времени через NTP (chrony)..."
+apt install chrony -y || error "Не удалось установить chrony."
+systemctl enable chronyd --now || error "Не удалось включить chronyd."
+success "Время синхронизировано с NTP серверами."
 
-install_3xui() {
-  echo "Устанавливаем 3X-UI панель..."
-  bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)
-}
+# 8. Проверка состояния NTP
+success "Шаг 8: Проверка состояния NTP..."
+echo "Статус chrony:"
+chronyc sources || error "Не удалось проверить chronyc sources."
+chronyc tracking || error "Не удалось проверить chronyc tracking."
 
-main() {
-  echo "=== Начало настройки: $(date) ==="
-  update_system
-  configure_ssh
-  configure_ufw
-  disable_ping
-  install_fail2ban
-  install_sqlite3
-  configure_ntp
-  check_ntp
-  generate_ssl
-  install_3xui
-  echo "=== Настройка завершена: $(date) ==="
-}
+# 9. Установка панели 3X-UI (используем официальный скрипт — он интерактивный)
+success "Шаг 9: Установка 3X-UI..."
+warning "Запускается интерактивный инсталлятор 3X-UI. Укажите порт 8443 (разрешен в UFW), username и password."
+bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) || error "Не удалось установить 3X-UI."
+warning "3X-UI установлен. Доступ: http://<your-ip>:8443 (или ваш порт). Логин/пароль указаны в выводе инсталлера."
 
-main "$@"
+# 10. Выпуск самоподписанного SSL сертификата (в /root/cert для использования в 3X-UI)
+success "Шаг 10: Генерация самоподписанного SSL сертификата..."
+mkdir -p /root/cert || error "Не удалось создать директорию /root/cert."
+openssl req -new -newkey rsa:2048 -days 365 -nodes -x509 \
+    -keyout /root/cert/server.key -out /root/cert/server.crt \
+    -subj "/C=US/ST=Denial/L=Springfield/O=Dis/CN=example.com" || error "Не удалось сгенерировать SSL сертификат."
+success "Сертификат сгенерирован в /root/cert. В 3X-UI настройте SSL в панели (Panel Settings > SSL)."
+
+success "Все шаги завершены успешно! Проверьте логи и конфигурацию."
