@@ -13,7 +13,11 @@ esac
 log() { echo "[$1] $2" | tee -a "$LOGFILE"; }
 run() { $DRY_RUN && log "INFO" "DRY-RUN: $*" || eval "$@"; }
 
-# === Шаги ===
+restart_ssh() {
+  systemctl reload ssh 2>/dev/null || systemctl restart ssh 2>/dev/null || \
+  systemctl reload sshd 2>/dev/null || systemctl restart sshd 2>/dev/null || \
+  systemctl restart ssh.socket 2>/dev/null || log ERROR "Не удалось перезапустить SSH"
+}
 
 step_update_system() {
   log INFO "[1] Обновление системы..."
@@ -24,28 +28,41 @@ step_update_system() {
 step_configure_ssh() {
   log INFO "[2] Настройка SSH..."
   local cfg="/etc/ssh/sshd_config"
+  local port=20022
+
+  if ss -tln | grep -q ":$port"; then
+    log ERROR "Порт $port уже занят другим процессом. Откат невозможен."
+    return
+  fi
+
+  if [ ! -f /etc/ssh/ssh_host_rsa_key ]; then
+    log WARN "SSH-ключи отсутствуют. Генерируем..."
+    run "ssh-keygen -A"
+  fi
+
+  if ! sshd -t; then
+    log ERROR "Конфигурация SSH содержит ошибки. Откат невозможен."
+    return
+  fi
+
   run "ufw allow 22/tcp"
-  run "ufw allow 20022/tcp"
-  grep -q 'Port 20022' "$cfg" || run "echo 'Port 20022' >> $cfg"
-  grep -q 'Port 22' "$cfg" || run "echo 'Port 22' >> $cfg"
-  run "sshd -t" || { log ERROR "Ошибка в конфигурации SSH"; return; }
+  run "ufw allow ${port}/tcp"
+  grep -q "Port ${port}" "$cfg" || run "echo 'Port ${port}' >> $cfg"
+  grep -q "Port 22" "$cfg" || run "echo 'Port 22' >> $cfg"
+  run "sshd -T | grep port"
+
   restart_ssh
   sleep 2
-  if $TEST_MODE || ! ss -tln | grep -q ':20022' || ! nc -z localhost 20022; then
-    log ERROR "❌ Порт 20022 недоступен — откат..."
-    run "sed -i '/Port 20022/d' $cfg"
-    run "ufw delete allow 20022/tcp || true"
+
+  if $TEST_MODE || ! ss -tln | grep -q ":${port}" || ! nc -z localhost ${port}; then
+    log ERROR "❌ Порт ${port} недоступен — откат..."
+    run "sed -i '/Port ${port}/d' $cfg"
+    run "ufw delete allow ${port}/tcp || true"
     restart_ssh
     log WARN "Откат SSH выполнен. Остался порт 22."
   else
-    log INFO "✅ SSH слушает на портах 22 и 20022."
+    log INFO "✅ SSH слушает на портах 22 и ${port}."
   fi
-}
-
-restart_ssh() {
-  systemctl reload ssh 2>/dev/null || systemctl restart ssh 2>/dev/null || \
-  systemctl reload sshd 2>/dev/null || systemctl restart sshd 2>/dev/null || \
-  systemctl restart ssh.socket 2>/dev/null || log ERROR "Не удалось перезапустить SSH"
 }
 
 step_firewall() {
