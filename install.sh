@@ -25,8 +25,27 @@ step_update_system() {
   run "apt-get update -y && apt-get upgrade -y && apt-get dist-upgrade -y"
 }
 
+step_firewall() {
+  log INFO "[2] Настройка UFW..."
+  run "ufw allow 22/tcp"
+  run "ufw allow 20022/tcp"
+  run "ufw allow 8443/tcp"
+  run "ufw allow 1985/tcp"
+  run "ufw --force enable"
+  if $TEST_MODE || ! ufw status | grep -q '20022'; then
+    log ERROR "❌ UFW не применил правило — откат..."
+    run "ufw delete allow 20022/tcp || true"
+  else
+    log INFO "✅ UFW настроен. Порт 20022 открыт."
+  fi
+}
+
 step_configure_ssh() {
-  log INFO "[2] Настройка SSH..."
+  log INFO "[3] Смена порта SSH..."
+
+  read -p "❓ Перейти к смене порта SSH на 20022? [y/N]: " confirm
+  [[ "$confirm" =~ ^[Yy]$ ]] || { log INFO "Пропущено по запросу пользователя."; return; }
+
   local cfg="/etc/ssh/sshd_config"
   local port=20022
 
@@ -45,8 +64,6 @@ step_configure_ssh() {
     return
   fi
 
-  run "ufw allow 22/tcp"
-  run "ufw allow ${port}/tcp"
   grep -q "Port ${port}" "$cfg" || run "echo 'Port ${port}' >> $cfg"
   grep -q "Port 22" "$cfg" || run "echo 'Port 22' >> $cfg"
   run "sshd -T | grep port"
@@ -62,20 +79,6 @@ step_configure_ssh() {
     log WARN "Откат SSH выполнен. Остался порт 22."
   else
     log INFO "✅ SSH слушает на портах 22 и ${port}."
-  fi
-}
-
-step_firewall() {
-  log INFO "[3] Настройка UFW..."
-  run "ufw allow 8443/tcp"
-  run "ufw allow 1985/tcp"
-  run "ufw --force enable"
-  if $TEST_MODE || ! ufw status | grep -q '8443'; then
-    log ERROR "❌ UFW не применил правило — откат..."
-    run "ufw delete allow 8443/tcp || true"
-    run "ufw delete allow 1985/tcp || true"
-  else
-    log INFO "✅ UFW настроен."
   fi
 }
 
@@ -158,8 +161,8 @@ step_3xui() {
 main() {
   log INFO "=== Начало настройки: $(date) ==="
   step_update_system
-  step_configure_ssh
   step_firewall
+  step_configure_ssh
   step_disable_ping
   step_fail2ban
   step_sqlite
