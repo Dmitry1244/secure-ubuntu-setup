@@ -4,10 +4,12 @@ set -euo pipefail
 LOGFILE="/var/log/server_setup.log"
 DRY_RUN=false
 TEST_MODE=false
+AUTO_SSH=false
 
 case "${1:-}" in
-  --dry-run) DRY_RUN=true; echo "🔍 DRY-RUN режим: изменения НЕ будут применены" ;;
-  --test) TEST_MODE=true; echo "🧪 ТЕСТОВЫЙ режим: симулируем ошибки для проверки rollback" ;;
+  --dry-run) DRY_RUN=true ;;
+  --test) TEST_MODE=true ;;
+  --auto-ssh) AUTO_SSH=true ;;
 esac
 
 log() { echo "[$1] $2" | tee -a "$LOGFILE"; }
@@ -42,12 +44,15 @@ step_firewall() {
 
 step_configure_ssh() {
   log INFO "[3] Смена порта SSH..."
-
-  read -p "❓ Перейти к смене порта SSH на 20022? [y/N]: " confirm
-  [[ "$confirm" =~ ^[Yy]$ ]] || { log INFO "Пропущено по запросу пользователя."; return; }
-
   local cfg="/etc/ssh/sshd_config"
   local port=20022
+
+  if ! $AUTO_SSH; then
+    read -p "❓ Перейти к смене порта SSH на $port? [y/N]: " confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || { log INFO "Пропущено по запросу пользователя."; return; }
+  else
+    log INFO "Автоматически применяем смену порта SSH на $port..."
+  fi
 
   if ss -tln | grep -q ":$port"; then
     log ERROR "Порт $port уже занят другим процессом. Откат невозможен."
@@ -64,21 +69,21 @@ step_configure_ssh() {
     return
   fi
 
-  grep -q "Port ${port}" "$cfg" || run "echo 'Port ${port}' >> $cfg"
+  grep -q "Port $port" "$cfg" || run "echo 'Port $port' >> $cfg"
   grep -q "Port 22" "$cfg" || run "echo 'Port 22' >> $cfg"
   run "sshd -T | grep port"
 
   restart_ssh
   sleep 2
 
-  if $TEST_MODE || ! ss -tln | grep -q ":${port}" || ! nc -z localhost ${port}; then
-    log ERROR "❌ Порт ${port} недоступен — откат..."
-    run "sed -i '/Port ${port}/d' $cfg"
-    run "ufw delete allow ${port}/tcp || true"
+  if $TEST_MODE || ! ss -tln | grep -q ":$port" || ! nc -z localhost $port; then
+    log ERROR "❌ Порт $port недоступен — откат..."
+    run "sed -i '/Port $port/d' $cfg"
+    run "ufw delete allow $port/tcp || true"
     restart_ssh
     log WARN "Откат SSH выполнен. Остался порт 22."
   else
-    log INFO "✅ SSH слушает на портах 22 и ${port}."
+    log INFO "✅ SSH слушает на портах 22 и $port."
   fi
 }
 
