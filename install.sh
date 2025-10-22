@@ -48,7 +48,7 @@ backup_file() {
   fi
 }
 
-# === SSH ключи и логика отключения пароля ===
+# === SSH ключи ===
 ssh_keys_setup() {
   log_step "Настройка SSH-ключей"
 
@@ -79,12 +79,27 @@ ssh_keys_setup() {
   fi
 }
 
-# === Остальные модули (сокращённо) ===
+# === Остальные модули ===
 update_system() { log_step "Обновление системы"; run_cmd "apt-get update -y"; run_cmd "apt-get upgrade -y"; }
 ufw_setup() { log_step "Настройка UFW"; run_cmd "ufw allow 8443/tcp"; run_cmd "ufw allow 20022/tcp"; run_cmd "ufw allow 1985/tcp"; run_cmd "ufw --force enable"; }
 ssh_port() { log_step "Смена SSH порта на 20022"; backup_file /etc/ssh/sshd_config; run_cmd "sed -i 's/^#Port 22/Port 20022/' /etc/ssh/sshd_config"; systemctl list-unit-files | grep -q '^ssh\.service' && run_cmd "systemctl restart ssh" || run_cmd "systemctl restart sshd"; }
 disable_ping() { log_step "Запрет ICMP ping"; run_cmd "echo 'net.ipv4.icmp_echo_ignore_all=1' >> /etc/sysctl.conf"; run_cmd "sysctl -p"; }
-fail2ban_setup() { log_step "Установка Fail2ban"; run_cmd "apt-get install -y fail2ban"; echo -e "[sshd]\nenabled=true\nport=20022\nlogpath=/var/log/auth.log\nmaxretry=5" > /etc/fail2ban/jail.local; run_cmd "systemctl enable fail2ban"; run_cmd "systemctl restart fail2ban"; }
+
+fail2ban_setup() {
+  log_step "Установка Fail2ban"
+  run_cmd "apt-get install -y fail2ban"
+  backup_file /etc/fail2ban/jail.local
+  cat <<EOF > /etc/fail2ban/jail.local
+[sshd]
+enabled = true
+port = 20022
+logpath = /var/log/auth.log
+maxretry = 5
+EOF
+  run_cmd "systemctl enable fail2ban"
+  run_cmd "systemctl restart fail2ban"
+}
+
 sqlite_install() { log_step "Установка sqlite3"; run_cmd "apt-get install -y sqlite3"; }
 ntp_setup() { log_step "Установка и настройка NTP"; run_cmd "apt-get install -y ntp || true"; systemctl list-unit-files | grep -q '^ntp\.service' && run_cmd "systemctl restart ntp" || true; }
 ssl_selfsigned() { log_step "Выпуск самоподписанного SSL"; mkdir -p /etc/ssl/selfsigned; run_cmd "openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout /etc/ssl/selfsigned/server.key -out /etc/ssl/selfsigned/server.crt -subj '/CN=$(hostname)'"; }
@@ -113,7 +128,7 @@ if [[ "$1" == "--dry-run" ]]; then DRY_RUN=true; log_info "Запуск в ре�
 update_system
 ufw_setup
 ssh_port
-ssh_keys_setup        # 🔑 Первый запуск — генерация ключа, второй запуск — отключение пароля
+ssh_keys_setup
 disable_ping
 fail2ban_setup
 sqlite_install
