@@ -6,7 +6,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 # === Глобальные переменные ===
 DRY_RUN=false
@@ -73,6 +73,34 @@ ssh_port() {
   else
     run_cmd "systemctl restart sshd"
   fi
+}
+
+ssh_keys_setup() {
+  log_step "Генерация SSH-ключа и настройка входа только по ключу"
+
+  mkdir -p /root/.ssh
+  chmod 700 /root/.ssh
+
+  if [ ! -f /root/.ssh/id_rsa ]; then
+    run_cmd "ssh-keygen -t rsa -b 4096 -f /root/.ssh/id_rsa -N ''"
+  fi
+
+  run_cmd "cat /root/.ssh/id_rsa.pub >> /root/.ssh/authorized_keys"
+  run_cmd "chmod 600 /root/.ssh/authorized_keys"
+
+  backup_file /etc/ssh/sshd_config
+  run_cmd "sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config"
+  run_cmd "sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config"
+  run_cmd "sed -i 's/^#PermitRootLogin yes/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config"
+
+  if systemctl list-unit-files | grep -q '^ssh\.service'; then
+    run_cmd "systemctl restart ssh"
+  else
+    run_cmd "systemctl restart sshd"
+  fi
+
+  log_info "SSH-ключ сгенерирован. Приватный ключ: /root/.ssh/id_rsa"
+  log_info "Скачайте его и используйте для подключения!"
 }
 
 disable_ping() {
@@ -183,6 +211,7 @@ fi
 update_system
 ufw_setup
 ssh_port
+ssh_keys_setup
 disable_ping
 fail2ban_setup
 sqlite_install
