@@ -1,180 +1,175 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash
+set -e
 
-LOGFILE="/var/log/server_setup.log"
+# === Цвета ===
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# === Глобальные переменные ===
 DRY_RUN=false
-TEST_MODE=false
-AUTO_SSH=false
+LOGFILE="setup.log"
+ROLLBACK_DIR="rollback"
+TOTAL_STEPS=0
+FAILED_STEPS=0
+FAILED_LIST=()
 
-case "${1:-}" in
-  --dry-run) DRY_RUN=true ;;
-  --test) TEST_MODE=true ;;
-  --auto-ssh) AUTO_SSH=true ;;
-esac
+mkdir -p "$ROLLBACK_DIR"
 
-log() { echo "[$1] $2" | tee -a "$LOGFILE"; }
-run() { $DRY_RUN && log "INFO" "DRY-RUN: $*" || eval "$@"; }
+# === Логирование ===
+log_step() { TOTAL_STEPS=$((TOTAL_STEPS+1)); echo -e "\n${BLUE}[STEP]${NC} $1" | tee -a "$LOGFILE"; }
+log_info() { echo -e "${GREEN}[INFO]${NC} $1" | tee -a "$LOGFILE"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1" | tee -a "$LOGFILE"; }
 
-restart_ssh() {
-  systemctl reload ssh 2>/dev/null || systemctl restart ssh 2>/dev/null || \
-  systemctl reload sshd 2>/dev/null || systemctl restart sshd 2>/dev/null || \
-  systemctl restart ssh.socket 2>/dev/null || log ERROR "Не удалось перезапустить SSH"
-}
-
-step_update_system() {
-  log INFO "[1] Обновление системы..."
-  run "export DEBIAN_FRONTEND=noninteractive"
-  run "apt-get update -y && apt-get upgrade -y && apt-get dist-upgrade -y"
-}
-
-step_firewall() {
-  log INFO "[2] Настройка UFW..."
-  run "ufw allow 22/tcp"
-  run "ufw allow 20022/tcp"
-  run "ufw allow 8443/tcp"
-  run "ufw allow 1985/tcp"
-  run "ufw --force enable"
-  if $TEST_MODE || ! ufw status | grep -q '20022'; then
-    log ERROR "❌ UFW не применил правило — откат..."
-    run "ufw delete allow 20022/tcp || true"
+# === Выполнение команд ===
+run_cmd() {
+  if $DRY_RUN; then
+    log_info "DRY-RUN: $1"
   else
-    log INFO "✅ UFW настроен. Порт 20022 открыт."
+    log_info "EXEC: $1"
+    bash -c "$1" 2>&1 | tee -a "$LOGFILE"
+    local status=${PIPESTATUS[0]}
+    if [ $status -ne 0 ]; then
+      log_error "Команда завершилась с ошибкой: $1"
+      FAILED_STEPS=$((FAILED_STEPS+1))
+      FAILED_LIST+=("$1")
+    fi
   fi
 }
 
-step_configure_ssh() {
-  log INFO "[3] Смена порта SSH..."
-  local cfg="/etc/ssh/sshd_config"
-  local port=20022
+# === Backup ===
+backup_file() {
+  if [ -f "$1" ]; then
+    local backup="$ROLLBACK_DIR/$(basename $1).$(date +%s).bak"
+    cp "$1" "$backup"
+    log_info "Backup $1 -> $backup"
+  fi
+}
 
-  if ! $AUTO_SSH; then
-    read -p "❓ Перейти к смене порта SSH на $port? [y/N]: " confirm
-    [[ "$confirm" =~ ^[Yy]$ ]] || { log INFO "Пропущено по запросу пользователя."; return; }
+# === Модули ===
+update_system() {
+  log_step "Обновление системы"
+  run_cmd "apt-get update -y"
+  run_cmd "apt-get upgrade -y"
+}
+
+ufw_setup() {
+  log_step "Настройка UFW"
+  run_cmd "ufw allow 8443/tcp"
+  run_cmd "ufw allow 20022/tcp"
+  run_cmd "ufw allow 1985/tcp"
+  run_cmd "ufw --force enable"
+}
+
+ssh_port() {
+  log_step "Смена SSH порта на 20022"
+  backup_file /etc/ssh/sshd_config
+  run_cmd "sed -i 's/^#Port 22/Port 20022/' /etc/ssh/sshd_config"
+
+  # Универсальный перезапуск SSH
+  if systemctl list-unit-files | grep -q '^ssh\.service'; then
+    run_cmd "systemctl restart ssh"
   else
-    log INFO "Автоматически применяем смену порта SSH на $port..."
+    run_cmd "systemctl restart sshd"
   fi
+}
 
-  if ss -tln | grep -q ":$port"; then
-    log ERROR "Порт $port уже занят другим процессом. Откат невозможен."
-    return
-  fi
+disable_ping() {
+  log_step "Запрет ICMP ping"
+  run_cmd "echo 'net.ipv4.icmp_echo_ignore_all=1' >> /etc/sysctl.conf"
+  run_cmd "sysctl -p"
+}
 
-  if [ ! -f /etc/ssh/ssh_host_rsa_key ]; then
-    log WARN "SSH-ключи отсутствуют. Генерируем..."
-    run "ssh-keygen -A"
-  fi
+fail2ban_setup() {
+  log_step "Установка Fail2ban"
+  run_cmd "apt-get install -y fail2ban"
+  backup_file /etc/fail2ban/jail.local
+  cat <<EOF > /etc/fail2ban/jail.local
+[sshd]
+enabled = true
+port = 20022
+logpath = /var/log/auth.log
+maxretry = 5
+EOF
+  run_cmd "systemctl enable fail2ban"
+  run_cmd "systemctl restart fail2ban"
+}
 
-  if ! sshd -t; then
-    log ERROR "Конфигурация SSH содержит ошибки. Откат невозможен."
-    return
-  fi
+sqlite_install() {
+  log_step "Установка sqlite3"
+  run_cmd "apt-get install -y sqlite3"
+}
 
-  grep -q "Port $port" "$cfg" || run "echo 'Port $port' >> $cfg"
-  grep -q "Port 22" "$cfg" || run "echo 'Port 22' >> $cfg"
-  run "sshd -T | grep port"
+ntp_setup() {
+  log_step "Установка и настройка NTP/Timesync"
+  run_cmd "apt-get install -y ntp || true"
 
-  restart_ssh
-  sleep 2
-
-  if $TEST_MODE || ! ss -tln | grep -q ":$port" || ! nc -z localhost $port; then
-    log ERROR "❌ Порт $port недоступен — откат..."
-    run "sed -i '/Port $port/d' $cfg"
-    run "ufw delete allow $port/tcp || true"
-    restart_ssh
-    log WARN "Откат SSH выполнен. Остался порт 22."
+  if systemctl list-unit-files | grep -q '^ntp\.service'; then
+    run_cmd "systemctl restart ntp"
+  elif systemctl list-unit-files | grep -q '^systemd-timesyncd\.service'; then
+    run_cmd "systemctl enable systemd-timesyncd.service"
+    run_cmd "systemctl start systemd-timesyncd.service"
+  elif systemctl list-unit-files | grep -q '^chrony\.service'; then
+    run_cmd "systemctl enable chrony.service"
+    run_cmd "systemctl start chrony.service"
   else
-    log INFO "✅ SSH слушает на портах 22 и $port."
+    log_error "Не найден ни ntp, ни systemd-timesyncd, ни chrony"
   fi
 }
 
-step_disable_ping() {
-  log INFO "[4] Запрет ICMP..."
-  grep -q "icmp_echo_ignore_all" /etc/sysctl.conf || run "echo 'net.ipv4.icmp_echo_ignore_all=1' >> /etc/sysctl.conf"
-  run "sysctl -w net.ipv4.icmp_echo_ignore_all=1"
-  if $TEST_MODE || [[ "$(sysctl -n net.ipv4.icmp_echo_ignore_all)" != "1" ]]; then
-    log ERROR "❌ ICMP не отключён — откат..."
-    run "sysctl -w net.ipv4.icmp_echo_ignore_all=0"
+ntp_status() {
+  log_step "Проверка состояния NTP"
+  run_cmd "ntpq -p || timedatectl show-timesync --all || chronyc tracking"
+}
+
+ssl_selfsigned() {
+  log_step "Выпуск самоподписанного SSL сертификата"
+  mkdir -p /etc/ssl/selfsigned
+  run_cmd "openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    -keyout /etc/ssl/selfsigned/server.key \
+    -out /etc/ssl/selfsigned/server.crt \
+    -subj '/CN=$(hostname)'"
+}
+
+install_3xui() {
+  log_step "Установка панели 3X-UI"
+  run_cmd "bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh)"
+}
+
+# === Итоговая сводка ===
+summary() {
+  echo -e "\n${YELLOW}========== ИТОГОВАЯ СВОДКА ==========${NC}"
+  echo -e "Всего шагов: $TOTAL_STEPS"
+  if [ $FAILED_STEPS -eq 0 ]; then
+    echo -e "${GREEN}Все шаги выполнены успешно ✅${NC}"
   else
-    log INFO "✅ ICMP отключён."
+    echo -e "${RED}Ошибок: $FAILED_STEPS ❌${NC}"
+    echo "Проблемные команды:"
+    for cmd in "${FAILED_LIST[@]}"; do
+      echo -e "  - $cmd"
+    done
+    echo -e "Подробности см. в ${YELLOW}setup.log${NC}"
   fi
+  echo -e "${YELLOW}=====================================${NC}\n"
 }
 
-step_fail2ban() {
-  log INFO "[5] Установка Fail2ban..."
-  run "apt-get install -y fail2ban"
-  run "systemctl enable --now fail2ban"
-  if $TEST_MODE || ! systemctl is-active --quiet fail2ban; then
-    log ERROR "❌ Fail2ban не активен — откат..."
-    run "systemctl stop fail2ban"
-    run "apt-get remove -y fail2ban"
-  else
-    log INFO "✅ Fail2ban работает."
-  fi
-}
+# === Main ===
+if [[ "$1" == "--dry-run" ]]; then
+  DRY_RUN=true
+  log_info "Запуск в режиме dry-run"
+fi
 
-step_sqlite() {
-  log INFO "[6] Установка sqlite3..."
-  run "apt-get install -y sqlite3"
-  if $TEST_MODE || ! command -v sqlite3 >/dev/null; then
-    log ERROR "❌ sqlite3 не найден — откат..."
-    run "apt-get remove -y sqlite3"
-  else
-    log INFO "✅ sqlite3 установлен."
-  fi
-}
+update_system
+ufw_setup
+ssh_port
+disable_ping
+fail2ban_setup
+sqlite_install
+ntp_setup
+ntp_status
+ssl_selfsigned
+install_3xui
 
-step_ntp() {
-  log INFO "[7] Установка chrony..."
-  run "apt-get install -y chrony"
-  run "systemctl enable --now chrony"
-  if $TEST_MODE || ! chronyc tracking | grep -q 'Leap status'; then
-    log ERROR "❌ NTP не синхронизирован — откат..."
-    run "systemctl stop chrony"
-    run "apt-get remove -y chrony"
-  else
-    log INFO "✅ NTP синхронизирован."
-  fi
-}
-
-step_ssl() {
-  log INFO "[8] Генерация SSL..."
-  local dir="/etc/ssl/selfsigned"
-  run "mkdir -p $dir"
-  run "openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-    -keyout $dir/server.key -out $dir/server.crt \
-    -subj '/C=RU/ST=MSK/L=Moscow/O=MyOrg/OU=IT/CN=$(hostname)'"
-  if $TEST_MODE || ! openssl x509 -checkend 86400 -in "$dir/server.crt" >/dev/null; then
-    log ERROR "❌ Сертификат недействителен — откат..."
-    run "rm -f $dir/server.crt $dir/server.key"
-  else
-    log INFO "✅ Сертификат создан."
-    run "openssl x509 -in $dir/server.crt -noout -enddate"
-  fi
-}
-
-step_3xui() {
-  log INFO "[9] Установка 3X-UI..."
-  run "bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh)"
-  if $TEST_MODE || [ ! -d "/usr/local/x-ui" ]; then
-    log ERROR "❌ 3X-UI не установлена — откат..."
-    run "rm -rf /usr/local/x-ui"
-  else
-    log INFO "✅ 3X-UI установлена."
-  fi
-}
-
-main() {
-  log INFO "=== Начало настройки: $(date) ==="
-  step_update_system
-  step_firewall
-  step_configure_ssh
-  step_disable_ping
-  step_fail2ban
-  step_sqlite
-  step_ntp
-  step_ssl
-  step_3xui
-  log INFO "=== Завершено: $(date) ==="
-}
-
-main
+summary
