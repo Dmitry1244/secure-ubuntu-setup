@@ -148,6 +148,15 @@ monitoring_tools() {
   run_cmd "apt-get install -y htop iotop iftop"
 }
 
+enable_bbr() {
+  log_step "Включение TCP BBR"
+  run_cmd "echo 'net.core.default_qdisc=fq' >> /etc/sysctl.conf"
+  run_cmd "echo 'net.ipv4.tcp_congestion_control=bbr' >> /etc/sysctl.conf"
+  run_cmd "sysctl -p"
+  run_cmd "sysctl net.ipv4.tcp_congestion_control"
+  run_cmd "lsmod | grep bbr || true"
+}
+
 # === Итоговая сводка ===
 summary() {
   echo -e "\n${YELLOW}========== ИТОГОВАЯ СВОДКА ==========${NC}"
@@ -183,5 +192,6 @@ ssl_selfsigned
 install_3xui
 auto_updates
 monitoring_tools
+enable_bbr
 
 summary
