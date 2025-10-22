@@ -89,7 +89,7 @@ fail2ban_setup() {
   log_step "Установка Fail2ban"
   run_cmd "apt-get install -y fail2ban"
   backup_file /etc/fail2ban/jail.local
-  cat <<EOF > /etc/fail2ban/jail.local
+  cat <<'EOF' > /etc/fail2ban/jail.local
 [sshd]
 enabled = true
 port = 20022
