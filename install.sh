@@ -132,11 +132,6 @@ ssl_selfsigned() {
     -subj '/CN=$(hostname)'"
 }
 
-install_3xui() {
-  log_step "Установка панели 3X-UI"
-  run_cmd "bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh)"
-}
-
 auto_updates() {
   log_step "Включение автоматических обновлений безопасности"
   run_cmd "apt-get install -y unattended-upgrades"
@@ -155,6 +150,11 @@ enable_bbr() {
   run_cmd "sysctl -p"
   run_cmd "sysctl net.ipv4.tcp_congestion_control"
   run_cmd "lsmod | grep bbr || true"
+}
+
+install_3xui() {
+  log_step "Установка панели 3X-UI"
+  run_cmd "bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh)"
 }
 
 # === Итоговая сводка ===
@@ -189,9 +189,9 @@ sqlite_install
 ntp_setup
 ntp_status
 ssl_selfsigned
-install_3xui
 auto_updates
 monitoring_tools
 enable_bbr
+install_3xui
 
 summary
