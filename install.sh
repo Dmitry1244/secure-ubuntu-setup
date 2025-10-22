@@ -138,6 +138,17 @@ install_3xui() {
   run_cmd "bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh)"
 }
 
+auto_updates() {
+  log_step "Включение автоматических обновлений безопасности"
+  run_cmd "apt-get install -y unattended-upgrades"
+  run_cmd "dpkg-reconfigure -f noninteractive unattended-upgrades"
+}
+
+monitoring_tools() {
+  log_step "Установка инструментов мониторинга"
+  run_cmd "apt-get install -y htop iotop iftop"
+}
+
 # === Итоговая сводка ===
 summary() {
   echo -e "\n${YELLOW}========== ИТОГОВАЯ СВОДКА ==========${NC}"
@@ -171,5 +182,7 @@ ntp_setup
 ntp_status
 ssl_selfsigned
 install_3xui
+auto_updates
+monitoring_tools
 
 summary
