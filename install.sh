@@ -30,8 +30,8 @@ fi
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=true ;;
-    --secure-ssh) SECURE_SSH=true ;;
-    --force-ssh-hardening) SECURE_SSH=true; FORCE_SSH_HARDEN=true ;;
+    --secure-ssh) SECURE_SSH=true ;; 
+    --force-ssh-hardening) SECURE_SSH=true; FORCE_SSH_HARDEN=true ;; 
   esac
 done
 
@@ -77,7 +77,7 @@ update_system() {
 
 ufw_setup() {
   log_step "Настройка UFW (разрешенные порты: 8443, 20022, 1985, 80)"
-  # Сбросим текущие правила (с бэкапом)
+  # Сбросим текущие ��равила (с бэкапом)
   run_cmd "ufw --force reset"
   run_cmd "ufw default deny incoming"
   run_cmd "ufw default allow outgoing"
@@ -302,8 +302,11 @@ EOF
 }
 
 install_3xui() {
-  log_step "Установка панели 3X-UI (опционально)"
-  run_cmd "bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh) || true"
+  log_step "Установка панели 3X-UI (опционально). Запускается с таймаутом 300s — если требуется ввод, установку можно завершить вручную позже."
+  # Запускаем инсталлятор с таймаутом, чтобы он не блокировал вывод итоговой сводки
+  # Если инсталлятор требует интерактивный ввод, он может не завершиться — после таймаута скрипт продолжит работу.
+  run_cmd "timeout 300 bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh) || true"
+  log_info "Если 3X-UI не установилась полностью (интерактивный ввод), запустите установку вручную после проверки: \n  bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh)"
 }
 
 # === Итоговая сводка ===
@@ -344,6 +347,7 @@ ssl_selfsigned
 auto_updates
 monitoring_tools
 enable_bbr
+# 3X-UI запускаем ПОСЛЕДНИМ, чтобы предыдущие правки (порт SSH/UFW и т.д.) были применены
 install_3xui
 
 summary
